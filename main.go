@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,7 +23,8 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringP("server", "s", "localhost:53", "target server")
+	rootCmd.PersistentFlags().StringP("server", "s", "localhost@53", "target server")
+	rootCmd.PersistentFlags().StringP("transport", "p", "udp", "transport udp,tcp,tls,https")
 	rootCmd.PersistentFlags().Uint16P("proc-num", "n", 16, "goroutine num")
 	rootCmd.PersistentFlags().Uint16P("time", "m", 30, "running minute")
 	rootCmd.PersistentFlags().BoolP("ticket", "t", false, "enable session ticket")
@@ -32,9 +35,34 @@ func main() {
 	rootCmd.Execute()
 }
 func serv(cmd *cobra.Command, args []string) {
-	server, err := cmd.PersistentFlags().GetString("server")
+	var port int
+	var err error
+	transport, err := cmd.PersistentFlags().GetString("transport")
+	switch transport {
+	case "tcp", "TCP":
+		transport = "tcp"
+		port = 53
+	case "dot", "DoT", "DOT", "tls", "tcp-tls", "TLS", "TCP-TLS":
+		transport = "tcp-tls"
+		port = 853
+	case "doh", "DoH", "DOH", "https":
+		transport = "https"
+		port = 443
+	default:
+		transport = "udp"
+		port = 53
+	}
+
+	s, err := cmd.PersistentFlags().GetString("server")
 	if err != nil {
 		log.Fatal(err)
+	}
+	server := strings.Split(s, "@")
+	if len(server) > 1 {
+		port, err = strconv.Atoi(server[1])
+		if err != nil {
+			log.Fatal("server %s is invalid", s)
+		}
 	}
 	proc_num, err := cmd.PersistentFlags().GetUint16("proc-num")
 	if err != nil {
@@ -56,7 +84,7 @@ func serv(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	host := server[0] + ":" + strconv.Itoa(port)
 	workers := []*worker{}
 	ctx, cancel := context.WithCancel(context.Background())
 	startCtx, start := context.WithCancel(context.Background())
@@ -79,11 +107,12 @@ func serv(cmd *cobra.Command, args []string) {
 			tlsConfig.MaxVersion = tls.VersionTLS13
 			tlsConfig.MinVersion = tls.VersionTLS13
 		}
-		worker := NewWorker(server, tlsConfig)
+		worker := NewWorker(host, transport, tlsConfig)
 		go worker.run(ctx, startCtx)
 		workers = append(workers, worker)
 	}
-	fmt.Printf("Target Server: %s\n", server)
+	fmt.Printf("Target Server: %s\n", host)
+	fmt.Printf("transport: %s\n", transport)
 	fmt.Printf("goroutinnum: %d\n", proc_num)
 	fmt.Printf("proc_time: %d\n", proc_time)
 	fmt.Printf("session_ticket: %v\n", ticket)
@@ -127,6 +156,7 @@ func serv(cmd *cobra.Command, args []string) {
 type worker struct {
 	server          string
 	tlsConfig       *tls.Config
+	transport       string
 	Count           uint64
 	Success         uint64
 	ConnectionError uint64
@@ -134,9 +164,10 @@ type worker struct {
 	DNSError        uint64
 }
 
-func NewWorker(server string, tlsConfig *tls.Config) *worker {
+func NewWorker(server string, transport string, tlsConfig *tls.Config) *worker {
 	return &worker{
 		server:    server,
+		transport: transport,
 		tlsConfig: tlsConfig,
 	}
 }
@@ -162,9 +193,10 @@ WAIT:
 
 			c := new(dns.Client)
 			c.TLSConfig = w.tlsConfig
-			c.Net = "tcp-tls"
+			c.Net = w.transport
 			r, _, err := c.Exchange(m, w.server)
 			if err != nil {
+				fmt.Println(err)
 				w.ConnectionError++
 				continue
 			}
